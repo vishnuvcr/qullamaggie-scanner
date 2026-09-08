@@ -1,35 +1,62 @@
-name: Auto Market Scanner
+name: Auto Market Scanner & Pages
 
 on:
-  workflow_dispatch: # Allows you to still click "Run workflow" manually
+  workflow_dispatch:
   schedule:
-    # 1. Pre-market at 9:00 AM IST (03:30 UTC) Mon-Fri
+    # 1. Pre-Market Run (9:00 AM IST -> 03:30 UTC) Mon-Fri
     - cron: '30 3 * * 1-5'
     
-    # 2. Hourly from 10:15 AM to 3:15 PM IST (04:45 to 09:45 UTC) Mon-Fri
+    # 2. Hourly Market Runs (10:15 AM to 3:15 PM IST -> 04:45 to 09:45 UTC) Mon-Fri
     - cron: '45 4-9 * * 1-5'
     
-    # 3. After-market at 4:00 PM IST (10:30 UTC) Mon-Fri
+    # 3. After-Market Run (4:00 PM IST -> 10:30 UTC) Mon-Fri
     - cron: '30 10 * * 1-5'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
 
 jobs:
   run-scan:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch Code
+      - name: Checkout Code
         uses: actions/checkout@v4
-        
-      - name: Setup Python
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip' # Speeds up installation times
-          
-      - name: Install Libraries
-        run: pip install yfinance pandas requests
-          
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas requests
+
       - name: Execute Scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python -u scanner.py
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+  deploy-pages:
+    needs: run-scan
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
