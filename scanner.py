@@ -1,4 +1,5 @@
 import os
+import html
 import requests
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,10 +26,12 @@ def send_telegram(text):
         "chat_id": CHAT_ID, 
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True # Prevents massive chart previews in chat
+        "disable_web_page_preview": True
     }
     try:
-        requests.post(url, data=payload, timeout=10)
+        response = requests.post(url, data=payload, timeout=10)
+        if response.status_code != 200:
+            print(f"Telegram API Error: {response.text}")
     except Exception as e:
         print(f"Failed to send Telegram message: {e}")
 
@@ -77,7 +80,7 @@ def process_ticker(t):
             orh_line = float(d['High'].iloc[-2])
             curr_price = float(d['Close'].iloc[-1])
 
-        dist_pct = ((orh_line - curr_price) / orh_line) * 100
+        dist_pct = ((orh_line - curr_price) /orh_line) * 100
         clean_ticker = t.replace(".NS", "")
 
         # --- BREAKOUT LOGIC (Last 2 Hourly Candles) ---
@@ -119,10 +122,13 @@ def process_ticker(t):
         return None
 
 def format_row(ticker, price, orh, dist=None, momentum=None):
-    """Formats a table row with a TradingView hyperlink while keeping alignment."""
+    """Formats a table row safely with HTML escaping and fixed column spacing."""
+    safe_ticker = html.escape(ticker)
     tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{ticker}"
-    spaces = " " * (10 - len(ticker))
-    linked_ticker = f'<a href="{tv_url}">{ticker}</a>{spaces}'
+    
+    # Calculate spacing padding to keep the monospaced table perfectly straight
+    padding = " " * max(0, 10 - len(ticker))
+    linked_ticker = f'<a href="{tv_url}">{safe_ticker}</a>{padding}'
     
     if dist is not None and momentum is not None:
         return f"{linked_ticker} | {price:<7.2f} | {orh:<7.2f} | {-dist:>5.1f}% | {momentum:>5.1f}%\n"
@@ -170,7 +176,6 @@ def scan():
 
     # 2. Top 3 Setups
     if setups:
-        # Sort setups by 3-Month Momentum (Highest to Lowest)
         setups = sorted(setups, key=lambda x: x['momentum'], reverse=True)
         top_3 = setups[:3]
         other_setups = setups[3:]
@@ -184,7 +189,6 @@ def scan():
 
         # 3. Remaining Setups
         if other_setups:
-            # Sort the rest by proximity to ORH
             other_setups = sorted(other_setups, key=lambda x: x['dist'])
             msg += f"<b>👀 OTHER SETUPS (Within {PROXIMITY_PCT}%)</b>\n<pre>\n"
             msg += f"{'TICKER':<10} | {'PRICE':<7} | {'ORH':<7} | {'DIST'}\n"
