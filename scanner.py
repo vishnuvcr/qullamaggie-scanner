@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- CONFIGURATION ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-PROXIMITY_PCT = 3.0  
+PROXIMITY_PCT = 1.5  # Updated to 1.5%
 MAX_WORKERS = 8  # 8 parallel threads for speed without IP bans
 
 def load_tickers():
@@ -32,27 +32,32 @@ def process_ticker(t):
         ticker_obj = yf.Ticker(t)
         
         # --- STAGE 1: Fast Daily Trend & Momentum Check ---
-        d = ticker_obj.history(period="3mo", interval="1d")
-        if d.empty or len(d) < 40:
+        # Pulled 6mo of data to ensure we can look back 63 trading days (3 months)
+        d = ticker_obj.history(period="6mo", interval="1d")
+        
+        if d.empty or len(d) < 65:
             return None
 
         d = d.dropna(subset=['Close', 'High', 'Low'])
-        if len(d) < 40:
+        if len(d) < 65:
             return None
 
         close_d = float(d['Close'].iloc[-1])
-        ema10 = float(d['Close'].ewm(span=10).mean().iloc[-1])
-        ema21 = float(d['Close'].ewm(span=21).mean().iloc[-1])
+        
+        # adjust=False matches TradingView's EMA formula exactly
+        ema10 = float(d['Close'].ewm(span=10, adjust=False).mean().iloc[-1])
+        ema21 = float(d['Close'].ewm(span=21, adjust=False).mean().iloc[-1])
         sma50 = float(d['Close'].rolling(50).mean().iloc[-1])
 
         # Trend Stack: Price > 10 EMA > 21 EMA > 50 SMA
         if not (close_d > ema10 and ema10 > ema21 and ema21 > sma50):
             return None
 
-        # 1-Month Momentum > 15%
-        one_mo_ago = float(d['Close'].iloc[-21])
-        one_mo_perf = ((close_d - one_mo_ago) / one_mo_ago) * 100
-        if one_mo_perf < 15.0:
+        # --- SYNCED WITH PINE SCRIPT: 3-Month Growth > 30% ---
+        # 63 trading days is approx 3 months (matching your c_63 Pine variable)
+        three_mo_ago = float(d['Close'].iloc[-64])
+        three_mo_perf = ((close_d - three_mo_ago) / three_mo_ago) * 100
+        if three_mo_perf < 30.0:
             return None
 
         # --- STAGE 2: Lazy-Load Hourly Data (Only for leaders) ---
@@ -65,7 +70,7 @@ def process_ticker(t):
         # ORH is strictly Yesterday's High (iloc[-2] since iloc[-1] is today)
         orh_line = float(d['High'].iloc[-2])
         
-        # Get accurate LTP from the Daily candle to avoid missing the 3:15-3:30pm NSE action
+        # Accurate LTP from the Daily candle to avoid missing the 3:15-3:30pm NSE action
         curr_price = float(d['Close'].iloc[-1])
         
         # Keep hourly data ONLY for checking the intraday volume spike
@@ -75,7 +80,7 @@ def process_ticker(t):
         # Calculate distance to ORH
         dist_pct = ((orh_line - curr_price) / orh_line) * 100
 
-        log_msg = f"🎯 {t} PASSED | Price: {curr_price:.2f} | ORH: {orh_line:.2f} | Dist: {dist_pct:+.1f}% | 1M: {one_mo_perf:.1f}%"
+        log_msg = f"🎯 {t} PASSED | Price: {curr_price:.2f} | ORH: {orh_line:.2f} | Dist: {dist_pct:+.1f}% | 3M: {three_mo_perf:.1f}%"
         
         alert_msg = None
         if curr_price >= orh_line and curr_h_vol > (avg_h_vol * 1.1):
