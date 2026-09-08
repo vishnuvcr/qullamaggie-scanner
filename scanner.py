@@ -61,11 +61,7 @@ def send_telegram(text):
             "disable_web_page_preview": True
         }
         fb_res = requests.post(url, json=fallback_payload, timeout=15)
-        if fb_res.status_code == 200:
-            return True
-        else:
-            print(f"❌ Fallback also failed ({fb_res.status_code}): {fb_res.text}")
-            return False
+        return fb_res.status_code == 200
 
     except Exception as e:
         print(f"❌ Network failure sending Telegram alert: {e}")
@@ -93,46 +89,36 @@ def send_telegram_chunks(full_msg):
 def process_ticker(t):
     """Processes a single ticker and returns structured data."""
     try:
-        # Small jitter to prevent spamming Yahoo servers simultaneously
         time.sleep(0.05)
         ticker_obj = yf.Ticker(t)
 
         # --- STAGE 1: Daily Trend & Momentum Check ---
         d = ticker_obj.history(period="6mo", interval="1d")
-        if d.empty or len(d) < 65:
-            return None
-
+        if d.empty or len(d) < 65: return None
         d = d.dropna(subset=['Close', 'High', 'Low'])
-        if len(d) < 65:
-            return None
+        if len(d) < 65: return None
 
         close_d = float(d['Close'].iloc[-1])
         high_6m = float(d['High'].max())
 
-        # EMA Trend alignment
         ema10 = float(d['Close'].ewm(span=10, adjust=False).mean().iloc[-1])
         ema21 = float(d['Close'].ewm(span=21, adjust=False).mean().iloc[-1])
         sma50 = float(d['Close'].rolling(50).mean().iloc[-1])
 
-        if not (close_d > ema10 and ema10 > ema21 and ema21 > sma50):
-            return None
+        if not (close_d > ema10 and ema10 > ema21 and ema21 > sma50): return None
 
-        # 3-Month Growth > 30%
         three_mo_ago = float(d['Close'].iloc[-64])
-        three_mo_perf = ((close_d - three_mo_ago) / three_mo_ago) * 100
-        if three_mo_perf < 30.0:
-            return None
+        if ((close_d - three_mo_ago) / three_mo_ago) * 100 < 30.0: return None
 
         # --- STAGE 2: Hourly Data ---
         h = ticker_obj.history(period="5d", interval="1h")
-        if h.empty or len(h) < 10:
-            return None
+        if h.empty or len(h) < 10: return None
         h = h.dropna(subset=['Close', 'High', 'Low'])
 
-        # Fix for Yahoo Finance daily candle lag
+        # Daily Lag Fix
         last_d_date = d.index[-1].date()
         last_h_date = h.index[-1].date()
-
+        
         if last_h_date > last_d_date:
             orh_line = float(d['High'].iloc[-1])
             curr_price = float(h['Close'].iloc[-1])
@@ -147,29 +133,26 @@ def process_ticker(t):
         # --- BREAKOUT & VOLUME METRICS ---
         h_vol_ma = h['Volume'].rolling(20).mean()
 
-        close_h_1 = float(h['Close'].iloc[-1])
+        high_h_1 = float(h['High'].iloc[-1])
         vol_h_1 = float(h['Volume'].iloc[-1])
         avg_h_vol_1 = float(h_vol_ma.iloc[-1]) if not pd.isna(h_vol_ma.iloc[-1]) and h_vol_ma.iloc[-1] > 0 else 1.0
 
-        close_h_2 = float(h['Close'].iloc[-2])
+        high_h_2 = float(h['High'].iloc[-2])
         vol_h_2 = float(h['Volume'].iloc[-2])
         avg_h_vol_2 = float(h_vol_ma.iloc[-2]) if not pd.isna(h_vol_ma.iloc[-2]) and h_vol_ma.iloc[-2] > 0 else 1.0
 
         rvol = vol_h_1 / avg_h_vol_1
 
-        breakout_c1 = (close_h_1 >= orh_line) and (vol_h_1 > avg_h_vol_1 * 1.1)
-        breakout_c2 = (close_h_2 >= orh_line) and (vol_h_2 > avg_h_vol_2 * 1.1)
-        is_breakout = breakout_c1 or breakout_c2
+        # Breakout Logic Separation
+        is_fresh_breakout = (high_h_1 >= orh_line) and (vol_h_1 > avg_h_vol_1 * 1.1)
+        is_active_breakout = (high_h_2 >= orh_line) and (vol_h_2 > avg_h_vol_2 * 1.1) and not is_fresh_breakout
 
-        # Setup criteria: strictly below resistance and within proximity window
+        # Setup Logic
         is_setup = (curr_price < orh_line) and (0 < dist_pct <= PROXIMITY_PCT)
-
-        # Count how many hourly candles tested near resistance (within 1.5% of ORH)
         resistance_tests = int((h['High'] >= (orh_line * 0.985)).sum())
 
-        # Setup scoring formula (higher is better):
-        # Rewards elevated RVOL, tests at resistance, and proximity to 6M high / ORH
-        setup_score = (rvol * 3.0) + (resistance_tests * 1.5) - (dist_pct * 2.0) - (dist_to_6m_high * 0.5)
+        # Immediate Surge Probability Score (High RVOL + High Tests + Extreme Tightness)
+        surge_score = (rvol * 5.0) + (resistance_tests * 2.0) - (dist_pct * 3.0) - (dist_to_6m_high * 0.5)
 
         tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{quote(clean_ticker)}"
 
@@ -182,11 +165,14 @@ def process_ticker(t):
             "url": tv_url,
             "rvol": rvol,
             "tests": resistance_tests,
-            "score": setup_score
+            "score": surge_score
         }
 
-        if is_breakout:
-            base_data["type"] = "BREAKOUT"
+        if is_fresh_breakout:
+            base_data["type"] = "FRESH_BREAKOUT"
+            return base_data
+        elif is_active_breakout:
+            base_data["type"] = "ACTIVE_BREAKOUT"
             return base_data
         elif is_setup:
             base_data["type"] = "SETUP"
@@ -200,59 +186,58 @@ def process_ticker(t):
 def scan():
     init_yfinance_crumb()
     tickers = load_tickers()
-    breakouts = []
-    setups = []
-    total = len(tickers)
+    fresh_breakouts, active_breakouts, setups = [], [], []
 
-    print(f"🚀 Starting multi-threaded scan across {total} tickers...")
+    print(f"🚀 Starting multi-threaded scan across {len(tickers)} tickers...")
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(process_ticker, t): t for t in tickers}
-
         for future in as_completed(futures):
             res = future.result()
             if res:
-                if res["type"] == "BREAKOUT":
-                    breakouts.append(res)
-                elif res["type"] == "SETUP":
-                    setups.append(res)
+                if res["type"] == "FRESH_BREAKOUT": fresh_breakouts.append(res)
+                elif res["type"] == "ACTIVE_BREAKOUT": active_breakouts.append(res)
+                elif res["type"] == "SETUP": setups.append(res)
 
-    if not breakouts and not setups:
+    if not (fresh_breakouts or active_breakouts or setups):
         print("🏁 Scan complete. No active breakouts or setups found.")
         return
 
-    # Sort breakouts by proximity and setups by breakout probability score
-    breakouts = sorted(breakouts, key=lambda x: x['dist'])
+    # Sort breakouts by tightness, setups by Immediate Surge Probability Score
+    fresh_breakouts = sorted(fresh_breakouts, key=lambda x: x['dist'])
+    active_breakouts = sorted(active_breakouts, key=lambda x: x['dist'])
     setups = sorted(setups, key=lambda x: x['score'], reverse=True)
 
     top_3_setups = setups[:3]
     other_setups = setups[3:]
 
-    # IST timestamp
     ist_time = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%d %b %Y, %I:%M %p")
 
-    msg = "<b>🕒 Qullamaggie Scan Report</b>\n"
-    msg += f"<i>{ist_time}</i>\n\n"
+    msg = f"<b>🕒 Qullamaggie Scan Report</b>\n<i>{ist_time}</i>\n\n"
 
-    if breakouts:
-        msg += "<b>🚀 ACTIVE BREAKOUTS</b>\n"
-        for b in breakouts:
+    if fresh_breakouts:
+        msg += "<b>🚨 FRESH BREAKOUTS (Last 1 Hour)</b>\n"
+        for b in fresh_breakouts:
+            msg += f"• <a href='{b['url']}'>{b['safe_ticker']}</a>: ₹{b['price']:.2f} (ORH: ₹{b['orh']:.2f})\n"
+        msg += "\n"
+
+    if active_breakouts:
+        msg += "<b>🚀 ACTIVE BREAKOUTS (Previous Hours)</b>\n"
+        for b in active_breakouts:
             msg += f"• <a href='{b['url']}'>{b['safe_ticker']}</a>: ₹{b['price']:.2f} (ORH: ₹{b['orh']:.2f})\n"
         msg += "\n"
 
     if top_3_setups:
-        msg += "<b>🌟 TOP 3 PRIME SETUPS</b> <i>(Volume + Resistance Tests)</i>\n"
+        msg += "<b>🌟 TOP 3 PRIME SETUPS</b> <i>(Highest Surge Probability)</i>\n"
         for s in top_3_setups:
-            msg += (
-                f"• <a href='{s['url']}'>{s['safe_ticker']}</a>: ₹{s['price']:.2f} "
-                f"| -{s['dist']:.1f}% to ORH | RVOL: {s['rvol']:.1f}x | Tests: {s['tests']}x\n"
-            )
+            msg += (f"• <a href='{s['url']}'>{s['safe_ticker']}</a>: ₹{s['price']:.2f} "
+                    f"| -{s['dist']:.1f}% | RVOL: {s['rvol']:.1f}x | Tests: {s['tests']}x\n")
         msg += "\n"
 
     if other_setups:
-        msg += f"<b>👀 OTHER SETUPS (Within {PROXIMITY_PCT}%)</b>\n"
+        msg += f"<b>👀 OTHER SETUPS (Ranked by Surge Probability)</b>\n"
         for s in other_setups:
-            msg += f"• <a href='{s['url']}'>{s['safe_ticker']}</a>: ₹{s['price']:.2f} | -{s['dist']:.1f}% to ORH\n"
+            msg += f"• <a href='{s['url']}'>{s['safe_ticker']}</a>: ₹{s['price']:.2f} | -{s['dist']:.1f}%\n"
 
     send_telegram_chunks(msg)
 
