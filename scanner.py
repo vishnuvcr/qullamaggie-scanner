@@ -61,10 +61,18 @@ def process_ticker(t):
             return None
         h = h.dropna(subset=['Close', 'High', 'Low'])
 
-        orh_line = float(d['High'].iloc[-4:-1].max())
-        curr_price = float(h['Close'].iloc[-1])
+        # --- MATCHING PINE SCRIPT LOGIC ---
+        # ORH is strictly Yesterday's High (iloc[-2] since iloc[-1] is today)
+        orh_line = float(d['High'].iloc[-2])
+        
+        # Get accurate LTP from the Daily candle to avoid missing the 3:15-3:30pm NSE action
+        curr_price = float(d['Close'].iloc[-1])
+        
+        # Keep hourly data ONLY for checking the intraday volume spike
         curr_h_vol = float(h['Volume'].iloc[-1])
         avg_h_vol = float(h['Volume'].rolling(20).mean().iloc[-1])
+
+        # Calculate distance to ORH
         dist_pct = ((orh_line - curr_price) / orh_line) * 100
 
         log_msg = f"🎯 {t} PASSED | Price: {curr_price:.2f} | ORH: {orh_line:.2f} | Dist: {dist_pct:+.1f}% | 1M: {one_mo_perf:.1f}%"
