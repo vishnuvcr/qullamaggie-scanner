@@ -1,37 +1,34 @@
-name: Qullamaggie Scanner
+name: Auto Market Scanner
 
 on:
-  workflow_dispatch: # Allows you to still click the "Run workflow" button manually
+  workflow_dispatch: # Allows you to still click "Run workflow" manually
   schedule:
-    # 1. Pre-Market Run (9:00 AM IST -> 03:30 UTC) Monday-Friday
+    # 1. Pre-market at 9:00 AM IST (03:30 UTC) Mon-Fri
     - cron: '30 3 * * 1-5'
     
-    # 2. Hourly Market Runs (10:15 AM to 3:15 PM IST -> 04:45 to 09:45 UTC) Monday-Friday
+    # 2. Hourly from 10:15 AM to 3:15 PM IST (04:45 to 09:45 UTC) Mon-Fri
     - cron: '45 4-9 * * 1-5'
     
-    # 3. After-Market Run (4:00 PM IST -> 10:30 UTC) Monday-Friday
+    # 3. After-market at 4:00 PM IST (10:30 UTC) Mon-Fri
     - cron: '30 10 * * 1-5'
 
 jobs:
-  run-scanner:
+  run-scan:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout Repository
+      - name: Fetch Code
         uses: actions/checkout@v4
         
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip' # Speeds up execution time
+          cache: 'pip' # Speeds up installation times
           
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install yfinance pandas requests
+      - name: Install Libraries
+        run: pip install yfinance pandas requests
           
-      - name: Run Qullamaggie Scanner
+      - name: Execute Scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
