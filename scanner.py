@@ -32,6 +32,8 @@ def send_telegram(text):
         response = requests.post(url, data=payload, timeout=10)
         if response.status_code != 200:
             print(f"Telegram API Error: {response.text}")
+        else:
+            print("✅ Telegram message sent successfully!")
     except Exception as e:
         print(f"Failed to send Telegram message: {e}")
 
@@ -80,7 +82,7 @@ def process_ticker(t):
             orh_line = float(d['High'].iloc[-2])
             curr_price = float(d['Close'].iloc[-1])
 
-        dist_pct = ((orh_line - curr_price) /orh_line) * 100
+        dist_pct = ((orh_line - curr_price) / orh_line) * 100
         clean_ticker = t.replace(".NS", "")
 
         # --- BREAKOUT LOGIC (Last 2 Hourly Candles) ---
@@ -126,7 +128,6 @@ def format_row(ticker, price, orh, dist=None, momentum=None):
     safe_ticker = html.escape(ticker)
     tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{ticker}"
     
-    # Calculate spacing padding to keep the monospaced table perfectly straight
     padding = " " * max(0, 10 - len(ticker))
     linked_ticker = f'<a href="{tv_url}">{safe_ticker}</a>{padding}'
     
@@ -156,7 +157,6 @@ def scan():
                 elif res["type"] == "SETUP":
                     setups.append(res)
 
-    # --- TELEGRAM MESSAGE FORMATTING ---
     if not breakouts and not setups:
         print("🏁 Scan complete. No active breakouts or setups found.")
         return
@@ -197,8 +197,9 @@ def scan():
                 msg += format_row(s['ticker'], s['price'], s['orh'], s['dist'])
             msg += "</pre>"
 
+    # Safe truncation preventing unclosed tags
     if len(msg) > 4000:
-        msg = msg[:4000] + "\n\n... [Message Truncated]"
+        msg = msg[:3950] + "\n\n... [Truncated]</pre>"
 
     send_telegram(msg)
     print("✅ Alert report compiled and sent to Telegram!")
