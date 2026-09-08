@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 # --- CONFIGURATION ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-PROXIMITY_PCT = 1.5  
+PROXIMITY_PCT = 3.0  # Setups within 3% below ORH
 MAX_WORKERS = 8  
 
 def load_tickers():
@@ -24,7 +24,7 @@ def send_telegram(text):
     payload = {
         "chat_id": CHAT_ID, 
         "text": text,
-        "parse_mode": "HTML"  # Enables bold text and monospaced tables
+        "parse_mode": "HTML"  
     }
     try:
         requests.post(url, data=payload, timeout=10)
@@ -80,16 +80,33 @@ def process_ticker(t):
             orh_line = float(d['High'].iloc[-2])
             curr_price = float(d['Close'].iloc[-1])
 
-        curr_h_vol = float(h['Volume'].iloc[-1])
-        avg_h_vol = float(h['Volume'].rolling(20).mean().iloc[-1])
-
+        # Distance calculation
         dist_pct = ((orh_line - curr_price) / orh_line) * 100
         clean_ticker = t.replace(".NS", "")
 
-        # Categorize the result
-        if curr_price >= orh_line and curr_h_vol > (avg_h_vol * 1.1):
+        # --- BREAKOUT LOGIC (Last 2 Hourly Candles) ---
+        h_vol_ma = h['Volume'].rolling(20).mean()
+        
+        # Last candle (-1)
+        close_h_1 = float(h['Close'].iloc[-1])
+        vol_h_1 = float(h['Volume'].iloc[-1])
+        avg_h_vol_1 = float(h_vol_ma.iloc[-1])
+        
+        # Previous candle (-2)
+        close_h_2 = float(h['Close'].iloc[-2])
+        vol_h_2 = float(h['Volume'].iloc[-2])
+        avg_h_vol_2 = float(h_vol_ma.iloc[-2])
+
+        breakout_c1 = (close_h_1 >= orh_line) and (vol_h_1 > avg_h_vol_1 * 1.1)
+        breakout_c2 = (close_h_2 >= orh_line) and (vol_h_2 > avg_h_vol_2 * 1.1)
+        is_breakout = breakout_c1 or breakout_c2
+
+        # --- SETUP LOGIC (Strictly Below ORH & Within Proximity) ---
+        is_setup = (curr_price < orh_line) and (0 < dist_pct <= PROXIMITY_PCT)
+
+        if is_breakout:
             return {"type": "BREAKOUT", "ticker": clean_ticker, "price": curr_price, "orh": orh_line, "dist": dist_pct}
-        elif -1.5 <= dist_pct <= PROXIMITY_PCT:
+        elif is_setup:
             return {"type": "SETUP", "ticker": clean_ticker, "price": curr_price, "orh": orh_line, "dist": dist_pct}
 
         return None
@@ -132,21 +149,21 @@ def scan():
     msg += f"<i>{ist_time}</i>\n\n"
 
     if breakouts:
-        msg += "<b>🚀 BREAKOUTS (Crossed ORH on Vol)</b>\n"
+        msg += "<b>🚀 BREAKOUTS (Last 2 Hrs)</b>\n"
         msg += "<pre>\n"
-        msg += f"{'TICKER':<10} | {'PRICE':<8} | {'ORH':<8}\n"
-        msg += "-" * 31 + "\n"
+        msg += f"{'TICKER':<10} | {'PRICE':<7} | {'ORH':<7}\n"
+        msg += "-" * 30 + "\n"
         for b in breakouts:
-            msg += f"{b['ticker']:<10} | {b['price']:<8.2f} | {b['orh']:<8.2f}\n"
+            msg += f"{b['ticker']:<10} | {b['price']:<7.2f} | {b['orh']:<7.2f}\n"
         msg += "</pre>\n"
 
     if setups:
-        msg += f"<b>👀 SETUPS (Within {PROXIMITY_PCT}%)</b>\n"
+        msg += f"<b>👀 SETUPS (Below ORH, Within {PROXIMITY_PCT}%)</b>\n"
         msg += "<pre>\n"
-        msg += f"{'TICKER':<10} | {'PRICE':<8} | {'DIST':<8}\n"
-        msg += "-" * 31 + "\n"
+        msg += f"{'TICKER':<10} | {'PRICE':<7} | {'ORH':<7} | {'DIST'}\n"
+        msg += "-" * 37 + "\n"
         for s in setups:
-            msg += f"{s['ticker']:<10} | {s['price']:<8.2f} | {s['dist']:+.2f}%\n"
+            msg += f"{s['ticker']:<10} | {s['price']:<7.2f} | {s['orh']:<7.2f} | {-s['dist']:+.1f}%\n"
         msg += "</pre>"
 
     # Telegram has a 4096 char limit. Truncate if the list is absurdly massive.
